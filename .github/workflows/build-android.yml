@@ -34,22 +34,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "Android SDK: $ANDROID_HOME"
-          if [ ! -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
-            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager 2>/dev/null | head -n 1)"
-          else
-            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" \
+              -type f -name sdkmanager 2>/dev/null | head -n 1 || true)"
           fi
-          if [ -z "${SDKMANAGER:-}" ] || [ ! -x "$SDKMANAGER" ]; then
+
+          if [ -z "$SDKMANAGER" ] || [ ! -x "$SDKMANAGER" ]; then
             echo "::error::Android SDK command-line tools not found."
             exit 1
           fi
-          echo "Using sdkmanager: $SDKMANAGER"
+
           yes | "$SDKMANAGER" --licenses || true
+
           "$SDKMANAGER" --install \
             "platform-tools" \
             "platforms;android-34" \
             "build-tools;34.0.0"
+
           echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
 
       - name: Set up Gradle
@@ -61,14 +65,24 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [ ! -f "pianoboy-android-1.zip" ]; then
-            echo "::error::pianoboy-android-1.zip was not found in the repository root."
+
+          if [ -f "PianoBoy-UI-Upgrade.zip" ]; then
+            ARCHIVE="PianoBoy-UI-Upgrade.zip"
+          elif [ -f "PianoBoy-Final-App-Files.zip" ]; then
+            ARCHIVE="PianoBoy-Final-App-Files.zip"
+          elif [ -f "pianoboy-android-1.zip" ]; then
+            ARCHIVE="pianoboy-android-1.zip"
+          else
+            echo "::error::No PianoBoy source ZIP found in repository root."
             ls -la
             exit 1
           fi
+
+          echo "Extracting: $ARCHIVE"
           mkdir -p extracted
-          unzip -o pianoboy-android-1.zip -d extracted
-          echo "Extracted project files:"
+          unzip -o "$ARCHIVE" -d extracted
+
+          echo "Extracted files:"
           find extracted -maxdepth 5 -type f | head -n 200
 
       - name: Locate Android project
@@ -76,15 +90,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           ROOT=""
-          while IFS= read -r settings; do
-            DIR="$(dirname "$settings")"
-            if [ -f "$DIR/build.gradle" ] || [ -f "$DIR/build.gradle.kts" ]; then
+
+          while IFS= read -r SETTINGS; do
+            DIR="$(dirname "$SETTINGS")"
+
+            if [ -f "$DIR/build.gradle" ] || \
+               [ -f "$DIR/build.gradle.kts" ]; then
               ROOT="$DIR"
               break
             fi
-          done < <(find extracted -type f \
-            \( -name settings.gradle -o -name settings.gradle.kts \))
+          done < <(
+            find extracted -type f \
+              \( -name settings.gradle \
+              -o -name settings.gradle.kts \)
+          )
 
           if [ -z "$ROOT" ]; then
             echo "::error::Could not find a Gradle Android project."
@@ -95,10 +116,32 @@ jobs:
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
           echo "Found project at: $ROOT"
 
+      - name: Check launcher icon resources
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          PROJECT="${{ steps.project.outputs.root }}"
+
+          echo "Checking Android manifest and icon resources..."
+
+          find "$PROJECT" -type f \
+            \( -name AndroidManifest.xml \
+            -o -iname '*ic_launcher*' \
+            -o -iname '*pianoboy*icon*' \) \
+            -print
+
+          if ! find "$PROJECT" -type f \
+            -name AndroidManifest.xml | grep -q .; then
+            echo "::error::AndroidManifest.xml was not found."
+            exit 1
+          fi
+
       - name: Build debug APK
         shell: bash
         run: |
           set -euo pipefail
+
           cd "${{ steps.project.outputs.root }}"
 
           if [ -f gradlew ]; then
@@ -108,25 +151,42 @@ jobs:
             gradle --no-daemon --stacktrace assembleDebug
           fi
 
-      - name: Find generated APK
+      - name: Find and validate APK
         id: apk
         shell: bash
         run: |
           set -euo pipefail
+
           APK="$(find extracted -type f \
             -path '*/build/outputs/apk/debug/*.apk' \
             ! -name '*-androidTest.apk' | head -n 1)"
 
           if [ -z "$APK" ]; then
-            echo "::error::Build completed without a debug APK."
-            find extracted -type f -path '*/build/outputs/*' || true
+            echo "::error::Build completed without generating an APK."
+            find extracted -type f \
+              -path '*/build/outputs/*' || true
+            exit 1
+          fi
+
+          if [ ! -s "$APK" ]; then
+            echo "::error::Generated APK is empty."
             exit 1
           fi
 
           mkdir -p release
           cp "$APK" release/PianoBoy.apk
-          echo "path=release/PianoBoy.apk" >> "$GITHUB_OUTPUT"
+
+          echo "APK created successfully:"
           ls -lh release/PianoBoy.apk
+
+          if command -v aapt >/dev/null 2>&1; then
+            aapt dump badging release/PianoBoy.apk
+          elif [ -x "$ANDROID_HOME/build-tools/34.0.0/aapt" ]; then
+            "$ANDROID_HOME/build-tools/34.0.0/aapt" \
+              dump badging release/PianoBoy.apk
+          fi
+
+          echo "path=release/PianoBoy.apk" >> "$GITHUB_OUTPUT"
 
       - name: Upload PianoBoy APK
         uses: actions/upload-artifact@v4
