@@ -16,6 +16,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
@@ -26,12 +30,27 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK packages
+      - name: Configure Android SDK
+        shell: bash
         run: |
-          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
+          set -euo pipefail
+          echo "Android SDK: $ANDROID_HOME"
+          if [ ! -x "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" ]; then
+            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager 2>/dev/null | head -n 1)"
+          else
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          fi
+          if [ -z "${SDKMANAGER:-}" ] || [ ! -x "$SDKMANAGER" ]; then
+            echo "::error::Android SDK command-line tools not found."
+            exit 1
+          fi
+          echo "Using sdkmanager: $SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses || true
+          "$SDKMANAGER" --install \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0"
+          echo "$ANDROID_HOME/platform-tools" >> "$GITHUB_PATH"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -39,44 +58,80 @@ jobs:
           gradle-version: '8.9'
 
       - name: Extract Android project
+        shell: bash
         run: |
+          set -euo pipefail
+          if [ ! -f "pianoboy-android-1.zip" ]; then
+            echo "::error::pianoboy-android-1.zip was not found in the repository root."
+            ls -la
+            exit 1
+          fi
+          mkdir -p extracted
           unzip -o pianoboy-android-1.zip -d extracted
-          find extracted -maxdepth 6 -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" -o -name "build.gradle" -o -name "build.gradle.kts" \)
+          echo "Extracted project files:"
+          find extracted -maxdepth 5 -type f | head -n 200
 
       - name: Locate Android project
         id: project
         shell: bash
         run: |
+          set -euo pipefail
           ROOT=""
-          while IFS= read -r f; do
-            d="$(dirname "$f")"
-            if [ -f "$d/build.gradle" ] || [ -f "$d/build.gradle.kts" ]; then
-              ROOT="$d"
+          while IFS= read -r settings; do
+            DIR="$(dirname "$settings")"
+            if [ -f "$DIR/build.gradle" ] || [ -f "$DIR/build.gradle.kts" ]; then
+              ROOT="$DIR"
               break
             fi
-          done < <(find extracted -type f \( -name settings.gradle -o -name settings.gradle.kts \))
+          done < <(find extracted -type f \
+            \( -name settings.gradle -o -name settings.gradle.kts \))
+
           if [ -z "$ROOT" ]; then
-            echo "::error::Could not locate Gradle project."
-            find extracted -maxdepth 6 -type f
+            echo "::error::Could not find a Gradle Android project."
+            find extracted -type f | head -n 300
             exit 1
           fi
+
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
-          echo "Project directory: $ROOT"
+          echo "Found project at: $ROOT"
 
       - name: Build debug APK
+        shell: bash
         run: |
+          set -euo pipefail
           cd "${{ steps.project.outputs.root }}"
+
           if [ -f gradlew ]; then
             chmod +x gradlew
-            ./gradlew --no-daemon assembleDebug
+            ./gradlew --no-daemon --stacktrace assembleDebug
           else
-            gradle --no-daemon assembleDebug
+            gradle --no-daemon --stacktrace assembleDebug
           fi
+
+      - name: Find generated APK
+        id: apk
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK="$(find extracted -type f \
+            -path '*/build/outputs/apk/debug/*.apk' \
+            ! -name '*-androidTest.apk' | head -n 1)"
+
+          if [ -z "$APK" ]; then
+            echo "::error::Build completed without a debug APK."
+            find extracted -type f -path '*/build/outputs/*' || true
+            exit 1
+          fi
+
+          mkdir -p release
+          cp "$APK" release/PianoBoy.apk
+          echo "path=release/PianoBoy.apk" >> "$GITHUB_OUTPUT"
+          ls -lh release/PianoBoy.apk
 
       - name: Upload PianoBoy APK
         uses: actions/upload-artifact@v4
         with:
           name: PianoBoy-APK
-          path: extracted/**/build/outputs/apk/debug/*.apk
+          path: release/PianoBoy.apk
           if-no-files-found: error
           retention-days: 14
