@@ -4,17 +4,23 @@ name: Build PianoBoy APK
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - main
+
+permissions:
+  contents: read
 
 jobs:
   build:
+    name: Build Android APK
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
       - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Set up Java
+      - name: Set up Java 17
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -22,23 +28,67 @@ jobs:
 
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK packages
+        run: |
+          sdkmanager "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
         with:
-          packages: platform-tools
+          gradle-version: '8.9'
 
       - name: Extract Android project
         run: |
-          unzip -o pianoboy-android-1.zip -d project
-          find project -name gradlew -type f
+          unzip -o pianoboy-android-1.zip -d extracted
+          echo "Files found:"
+          find extracted -maxdepth 5 -type f \
+            \( -name "settings.gradle" \
+            -o -name "settings.gradle.kts" \
+            -o -name "build.gradle" \
+            -o -name "build.gradle.kts" \
+            -o -name "gradlew" \)
+
+      - name: Locate Android project
+        id: project
+        shell: bash
+        run: |
+          ROOT=""
+          for f in $(find extracted -type f \
+            \( -name settings.gradle -o -name settings.gradle.kts \)); do
+            d="$(dirname "$f")"
+            if [ -f "$d/build.gradle" ] || \
+               [ -f "$d/build.gradle.kts" ]; then
+              ROOT="$d"
+              break
+            fi
+          done
+
+          if [ -z "$ROOT" ]; then
+            echo "::error::Could not locate Gradle project. Check the extracted file listing."
+            exit 1
+          fi
+
+          echo "root=$ROOT" >> "$GITHUB_OUTPUT"
+          echo "Project directory: $ROOT"
 
       - name: Build debug APK
         run: |
-          cd project
-          chmod +x gradlew
-          ./gradlew assembleDebug
+          cd "${{ steps.project.outputs.root }}"
+          if [ -f gradlew ]; then
+            chmod +x gradlew
+            ./gradlew --no-daemon assembleDebug
+          else
+            gradle --no-daemon assembleDebug
+          fi
 
-      - name: Upload APK
+      - name: Upload PianoBoy APK
         uses: actions/upload-artifact@v4
         with:
           name: PianoBoy-APK
-          path: project/**/build/outputs/apk/debug/*.apk
+          path: |
+            extracted/**/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+          retention-days: 14
