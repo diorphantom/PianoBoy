@@ -26,16 +26,12 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-       - name: Set up Android SDK
+      - name: Set up Android SDK
         uses: android-actions/setup-android@v3
-        with:
-          packages: platform-tools
 
       - name: Install Android SDK packages
         run: |
-          sdkmanager "platform-tools" \
-            "platforms;android-34" \
-            "build-tools;34.0.0"
+          sdkmanager --install "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
@@ -45,34 +41,25 @@ jobs:
       - name: Extract Android project
         run: |
           unzip -o pianoboy-android-1.zip -d extracted
-          echo "Files found:"
-          find extracted -maxdepth 5 -type f \
-            \( -name "settings.gradle" \
-            -o -name "settings.gradle.kts" \
-            -o -name "build.gradle" \
-            -o -name "build.gradle.kts" \
-            -o -name "gradlew" \)
+          find extracted -maxdepth 6 -type f \( -name "settings.gradle" -o -name "settings.gradle.kts" -o -name "build.gradle" -o -name "build.gradle.kts" \)
 
       - name: Locate Android project
         id: project
         shell: bash
         run: |
           ROOT=""
-          for f in $(find extracted -type f \
-            \( -name settings.gradle -o -name settings.gradle.kts \)); do
+          while IFS= read -r f; do
             d="$(dirname "$f")"
-            if [ -f "$d/build.gradle" ] || \
-               [ -f "$d/build.gradle.kts" ]; then
+            if [ -f "$d/build.gradle" ] || [ -f "$d/build.gradle.kts" ]; then
               ROOT="$d"
               break
             fi
-          done
-
+          done < <(find extracted -type f \( -name settings.gradle -o -name settings.gradle.kts \))
           if [ -z "$ROOT" ]; then
-            echo "::error::Could not locate Gradle project. Check the extracted file listing."
+            echo "::error::Could not locate Gradle project."
+            find extracted -maxdepth 6 -type f
             exit 1
           fi
-
           echo "root=$ROOT" >> "$GITHUB_OUTPUT"
           echo "Project directory: $ROOT"
 
@@ -90,7 +77,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: PianoBoy-APK
-          path: |
-            extracted/**/build/outputs/apk/debug/*.apk
+          path: extracted/**/build/outputs/apk/debug/*.apk
           if-no-files-found: error
           retention-days: 14
